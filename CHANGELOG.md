@@ -21,6 +21,11 @@ and this project adheres to Rust's notion of
   - `ActionBytes` implements `ShieldedOutput` and converts into `CompactAction`,
     with `OrchardDomain::for_action_bytes` building its domain, for wallet
     trial-decryption without decompressing
+  - `impl {PartialEq, Eq}` for `ActionBytes`, `BundleBytes`, `Proof`,
+    `bundle::Authorized`, `note::TransmittedNoteCiphertext` and
+    `primitives::redpallas::Signature`
+- `bundle::{ActionEncoding, BundleEncoding}`, the views of the byte encodings
+  implemented by both tiers
 - `orchard::pczt::Action::decrypt_output_with_ivk`
 - `orchard::pczt::Action::decrypt_compact_output_with_ivk`
 - `orchard::pczt::Action::recover_output_with_ovk`
@@ -37,6 +42,9 @@ and this project adheres to Rust's notion of
   that they alias.
 
 ### Changed
+- `bundle::commitments::{hash_bundle_txid_data, hash_bundle_auth_data}` are
+  public, and take any `BundleEncoding` rather than a `Bundle`, so a
+  transaction encoder can reach the ZIP-244 digests from either tier
 - MSRV is now 1.88
 - Migrated to `ff 0.14`, `group 0.14`, `pasta_curves 0.6`, `rand_core 0.10`,
   `reddsa 0.6`, and `zcash_note_encryption 0.5`.
