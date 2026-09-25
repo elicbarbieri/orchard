@@ -57,6 +57,8 @@ and this project adheres to Rust's notion of
   the domain's `NoteCiphertextBytes`, so the field has to hold that type. The
   wrapper is a `#[derive(Clone, Copy)]` newtype over the same array; use `.0`
   (or `AsRef<[u8]>`) to reach the bytes.
+- Derive MerkleCRH Sinsemilla domain once via lazy_static rather than
+  per `MerkleHashOrchard::combine`
 
 ## [0.15.5] - 2026-08-02
 
