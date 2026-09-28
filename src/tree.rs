@@ -1,5 +1,7 @@
 //! Types related to Orchard note commitment trees and anchors.
 
+mod batch;
+
 use alloc::vec::Vec;
 use core::iter;
 
@@ -206,6 +208,30 @@ impl MerkleHashOrchard {
     pub fn from_bytes(bytes: &[u8; 32]) -> CtOption<Self> {
         pallas::Base::from_repr(*bytes).map(MerkleHashOrchard)
     }
+
+    /// Parents of `children` taken pairwise at `level`, equal to [`Hashable::combine`] per pair
+    ///
+    /// - Position-weighted Sinsemilla over precomputed tables, per-step exception checks kept
+    /// - Parents whose hash hits an exception are recomputed by [`Hashable::combine`]
+    /// - Variable time: for public tree nodes only
+    /// - Panics if `children` has an odd length
+    pub fn combine_pairs(level: Level, children: &[Self]) -> Vec<Self> {
+        assert!(children.len().is_multiple_of(2), "children pair up");
+        let layer = u8::from(level);
+        let messages: Vec<[u16; batch::WORDS]> = children
+            .chunks_exact(2)
+            .map(|pair| batch::words(layer, &pair[0].0, &pair[1].0))
+            .collect();
+        batch::WEIGHTED_MERKLE_CRH
+            .hash(&messages)
+            .into_iter()
+            .zip(children.chunks_exact(2))
+            .map(|(parent, pair)| match parent {
+                Some(parent) => MerkleHashOrchard(parent),
+                None => MerkleHashOrchard::combine(level, &pair[0], &pair[1]),
+            })
+            .collect()
+    }
 }
 
 impl ConditionallySelectable for MerkleHashOrchard {
@@ -265,15 +291,30 @@ impl<'de> Deserialize<'de> for MerkleHashOrchard {
 }
 
 /// Test utilities available under the `test-dependencies` feature flag.
-#[cfg(feature = "test-dependencies")]
+#[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing {
-    use ff::Field;
+    use ff::{Field, FromUniformBytes};
+    use pasta_curves::pallas;
+    use proptest::prelude::*;
     use rand::{
         distr::{Distribution, StandardUniform},
         Rng,
     };
 
     use super::MerkleHashOrchard;
+
+    prop_compose! {
+        /// Generates a uniformly random tree node
+        pub fn arb_merkle_hash()(
+            low in any::<[u8; 32]>(),
+            high in any::<[u8; 32]>(),
+        ) -> MerkleHashOrchard {
+            let mut wide = [0u8; 64];
+            wide[..32].copy_from_slice(&low);
+            wide[32..].copy_from_slice(&high);
+            MerkleHashOrchard(pallas::Base::from_uniform_bytes(&wide))
+        }
+    }
 
     impl MerkleHashOrchard {
         /// Return a random fake `MerkleHashOrchard`.
@@ -292,12 +333,76 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use {
-        crate::tree::{MerkleHashOrchard, EMPTY_ROOTS},
+        crate::{
+            constants::MERKLE_DEPTH_ORCHARD,
+            tree::{testing::arb_merkle_hash, MerkleHashOrchard, EMPTY_ROOTS},
+        },
+        alloc::vec::Vec,
         group::ff::PrimeField,
-        incrementalmerkletree::{frontier::Frontier, Level, Marking, MerklePath, Retention},
+        incrementalmerkletree::{
+            frontier::Frontier, Hashable, Level, Marking, MerklePath, Retention,
+        },
         pasta_curves::pallas,
+        proptest::prelude::*,
         shardtree::{store::memory::MemoryShardStore, ShardTree},
     };
+
+    /// Batch sizes from one pair to past the 64-pair lockstep crossover
+    const MAX_PAIRS: usize = 96;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(8))]
+
+        #[test]
+        fn combine_pairs_equals_combine_per_pair(
+            level in 0..MERKLE_DEPTH_ORCHARD as u8,
+            pairs in prop::collection::vec((arb_merkle_hash(), arb_merkle_hash()), 0..=MAX_PAIRS),
+        ) {
+            let level = Level::from(level);
+            let children: Vec<MerkleHashOrchard> =
+                pairs.iter().flat_map(|(left, right)| [*left, *right]).collect();
+            let expected: Vec<MerkleHashOrchard> = pairs
+                .iter()
+                .map(|(left, right)| MerkleHashOrchard::combine(level, left, right))
+                .collect();
+            prop_assert_eq!(MerkleHashOrchard::combine_pairs(level, &children), expected);
+        }
+    }
+
+    #[test]
+    fn combine_pairs_rebuilds_the_empty_root_vectors() {
+        let tv_empty_roots = crate::test_vectors::commitment_tree::test_vectors().empty_roots;
+        let mut node = MerkleHashOrchard::empty_leaf();
+        assert_eq!(tv_empty_roots[0], node.to_bytes());
+        for level in 0..MERKLE_DEPTH_ORCHARD as u8 {
+            node = MerkleHashOrchard::combine_pairs(level.into(), &[node, node])[0];
+            assert_eq!(
+                tv_empty_roots[usize::from(level) + 1],
+                node.to_bytes(),
+                "{level}"
+            );
+        }
+    }
+
+    /// Vector `i` = depth-4 tree of leaves `0..=i`, the rest uncommitted
+    #[test]
+    fn combine_pairs_rebuilds_the_merkle_path_vector_roots() {
+        for (i, tv) in crate::test_vectors::merkle_path::test_vectors()
+            .into_iter()
+            .enumerate()
+        {
+            let mut nodes: Vec<MerkleHashOrchard> = tv.leaves[..=i]
+                .iter()
+                .map(|leaf| MerkleHashOrchard::from_bytes(leaf).expect("canonical vector leaf"))
+                .collect();
+            nodes.resize(tv.leaves.len(), MerkleHashOrchard::empty_leaf());
+            for level in 0..tv.paths[i].len() as u8 {
+                nodes = MerkleHashOrchard::combine_pairs(level.into(), &nodes);
+            }
+            let root = MerkleHashOrchard::from_bytes(&tv.root).expect("canonical vector root");
+            assert_eq!(nodes, [root], "vector {i}");
+        }
+    }
 
     #[test]
     fn test_vectors() {

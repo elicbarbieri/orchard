@@ -82,6 +82,7 @@ rand = { version = "0.10", features = ["chacha", "std", "std_rng", "sys_rng", "t
 zcash_note_encryption = { version = "0.5", features = ["pre-zip-212"] }
 incrementalmerkletree = { version = "0.8.1", features = ["test-dependencies"] }
 shardtree = "0.6"
+sinsemilla = { version = "0.2", features = ["test-dependencies"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 inferno = { version = "0.11", default-features = false, features = ["multithreaded", "nameattr"] }
@@ -114,6 +115,10 @@ harness = false
 name = "circuit"
 harness = false
 required-features = ["circuit"]
+
+[[bench]]
+name = "merkle_crh"
+harness = false
 
 [patch.crates-io]
 halo2_proofs = { git = "https://github.com/zcash/halo2.git", rev = "232496b154e6332c88924e4affa8351ff92408b4" }
