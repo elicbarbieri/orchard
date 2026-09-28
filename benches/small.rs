@@ -71,7 +71,8 @@ fn merkle_crh_batch(c: &mut Criterion) {
     }
 
     for width in BATCH_WIDTHS {
-        let pairs: Vec<_> = nodes[..width * 2]
+        let children = &nodes[..width * 2];
+        let pairs: Vec<_> = children
             .chunks_exact(2)
             .map(|pair| (pair[0], pair[1]))
             .collect();
@@ -81,6 +82,8 @@ fn merkle_crh_batch(c: &mut Criterion) {
             pairs.iter().map(|(left, right)| (left, right)),
         );
         assert_eq!(actual, expected, "scalar/batch mismatch at width {width}");
+        let actual = MerkleHashOrchard::combine_pairs(level, children);
+        assert_eq!(actual, expected, "scalar/pairs mismatch at width {width}");
 
         group.throughput(Throughput::Elements(
             u64::try_from(width).expect("batch width fits in u64"),
@@ -95,6 +98,9 @@ fn merkle_crh_batch(c: &mut Criterion) {
                     black_box(&pairs).iter().map(|(left, right)| (left, right)),
                 )
             })
+        });
+        group.bench_with_input(BenchmarkId::new("pairs", width), &width, |b, _| {
+            b.iter(|| MerkleHashOrchard::combine_pairs(level, black_box(children)))
         });
     }
 

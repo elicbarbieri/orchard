@@ -9,6 +9,10 @@ and this project adheres to Rust's notion of
 
 ### Added
 
+- `tree::MerkleHashOrchard::combine_pairs`, hashing a tree level's parents in one
+  batch, equal to `Hashable::combine` per pair (position-weighted Sinsemilla over
+  precomputed tables, per-step exception checks kept)
+- `tree::testing::arb_merkle_hash`
 - A bytes tier holding an Action description with `cv_net`, `rk` and `epk` left
   compressed, so reading from disk/wire costs no curve arithmetic
   - `ActionBytes` and `BundleBytes`, mirroring `Action` and `Bundle`, with
