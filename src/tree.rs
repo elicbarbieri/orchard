@@ -231,30 +231,6 @@ impl MerkleHashOrchard {
         .map(|hash| MerkleHashOrchard(hash.unwrap_or(pallas::Base::zero())))
         .collect()
     }
-
-    /// Parents of `children` taken pairwise at `level`, equal to [`Hashable::combine`] per pair
-    ///
-    /// - Position-weighted Sinsemilla over precomputed tables, per-step exception checks kept
-    /// - Parents whose hash hits an exception are recomputed by [`Hashable::combine`]
-    /// - Variable time: for public tree nodes only
-    /// - Panics if `children` has an odd length
-    pub fn combine_pairs(level: Level, children: &[Self]) -> Vec<Self> {
-        assert!(children.len().is_multiple_of(2), "children pair up");
-        let layer = u8::from(level);
-        let messages: Vec<[u16; batch::WORDS]> = children
-            .chunks_exact(2)
-            .map(|pair| batch::words(layer, &pair[0].0, &pair[1].0))
-            .collect();
-        batch::WEIGHTED_MERKLE_CRH
-            .hash(&messages)
-            .into_iter()
-            .zip(children.chunks_exact(2))
-            .map(|(parent, pair)| match parent {
-                Some(parent) => MerkleHashOrchard(parent),
-                None => MerkleHashOrchard::combine(level, &pair[0], &pair[1]),
-            })
-            .collect()
-    }
 }
 
 fn merkle_crh_message(
@@ -295,6 +271,14 @@ impl Hashable for MerkleHashOrchard {
                 .hash(merkle_crh_message(level, left, right))
                 .unwrap_or(pallas::Base::zero()),
         )
+    }
+
+    /// - Position-weighted Sinsemilla over precomputed tables, per-step exception checks kept
+    /// - Parents whose hash hits an exception are recomputed by [`Hashable::combine`]
+    /// - `multicore`: wide levels split across rayon tasks
+    /// - Variable time: for public tree nodes only
+    fn combine_pairs(level: Level, children: &[Self]) -> Vec<Self> {
+        batch::combine_pairs(level, children)
     }
 
     fn empty_root(level: Level) -> Self {
@@ -444,8 +428,8 @@ mod tests {
         }
     }
 
-    /// Batch sizes from one pair to past the 64-pair lockstep crossover
-    const MAX_PAIRS: usize = 96;
+    /// Batch sizes from one pair to past the 64-pair lockstep crossover and the 256-pair task split
+    const MAX_PAIRS: usize = 600;
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(8))]

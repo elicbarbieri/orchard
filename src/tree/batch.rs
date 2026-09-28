@@ -1,4 +1,4 @@
-//! Batched MerkleCRH^Orchard, used by [`super::MerkleHashOrchard::combine_pairs`]
+//! Batched MerkleCRH^Orchard: `MerkleHashOrchard`'s [`Hashable::combine_pairs`]
 //!
 //! - Position-weighted Sinsemilla over precomputed tables, the spec's per-step checks kept exact
 //! - Derivation and exception mapping: book `design/commitment-tree.md` ("Batched MerkleCRH")
@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 use ff::{BatchInverter, Field, PrimeField};
 use group::{Curve, CurveAffine as _, Group};
+use incrementalmerkletree::{Hashable, Level};
 use lazy_static::lazy_static;
 use pasta_curves::{
     arithmetic::{Coordinates, CurveAffine},
@@ -15,10 +16,11 @@ use pasta_curves::{
 };
 use sinsemilla::{K, SINSEMILLA_S};
 
+use super::MerkleHashOrchard;
 use crate::constants::sinsemilla::{L_ORCHARD_MERKLE, Q_MERKLE_CRH};
 
 /// Words of a MerkleCRH message: the layer, then each child's [`L_ORCHARD_MERKLE`] bits
-pub(super) const WORDS: usize = (K + 2 * L_ORCHARD_MERKLE) / K;
+const WORDS: usize = (K + 2 * L_ORCHARD_MERKLE) / K;
 
 const _: () = assert!(
     (K + 2 * L_ORCHARD_MERKLE).is_multiple_of(K),
@@ -33,12 +35,16 @@ const TABLE: usize = 1 << K;
 /// - Measured µs/pair, lockstep vs projective: 32 → 15.3 vs 11.7, 64 → 11.4 vs 11.9
 const LOCKSTEP_LANES: usize = 64;
 
+/// Pairs per rayon task (lockstep at 256: 8.3 µs/pair, within 10% of 1024's 7.5)
+#[cfg(feature = "multicore")]
+const PAIRS_PER_TASK: usize = 256;
+
 /// Affine `(x, y)` of a point known not to be the identity
 type Coords = (pallas::Base, pallas::Base);
 
 lazy_static! {
     /// Tables for MerkleCRH's `Q` (`HashDomain::Q` is test-only upstream)
-    pub(super) static ref WEIGHTED_MERKLE_CRH: Weighted = Weighted::new(
+    static ref WEIGHTED_MERKLE_CRH: Weighted = Weighted::new(
         pallas::Affine::from_xy(
             pallas::Base::from_repr(Q_MERKLE_CRH.0).expect("canonical Q_MERKLE_CRH.x"),
             pallas::Base::from_repr(Q_MERKLE_CRH.1).expect("canonical Q_MERKLE_CRH.y"),
@@ -48,11 +54,47 @@ lazy_static! {
     );
 }
 
+/// Parents of `children` taken pairwise, equal to [`Hashable::combine`] per pair
+pub(super) fn combine_pairs(
+    level: Level,
+    children: &[MerkleHashOrchard],
+) -> Vec<MerkleHashOrchard> {
+    assert!(children.len().is_multiple_of(2), "children pair up");
+    // below one task, no pool handoff (a lone pair = the root's serial chain)
+    #[cfg(feature = "multicore")]
+    if children.len() > 2 * PAIRS_PER_TASK {
+        use rayon::prelude::*;
+        return children
+            .par_chunks(2 * PAIRS_PER_TASK)
+            .flat_map_iter(|chunk| parents(level, chunk))
+            .collect();
+    }
+    parents(level, children)
+}
+
+/// One task's parents: exceptional messages recomputed by the spec's [`Hashable::combine`]
+fn parents(level: Level, children: &[MerkleHashOrchard]) -> Vec<MerkleHashOrchard> {
+    let layer = u8::from(level);
+    let messages: Vec<[u16; WORDS]> = children
+        .chunks_exact(2)
+        .map(|pair| words(layer, &pair[0].0, &pair[1].0))
+        .collect();
+    WEIGHTED_MERKLE_CRH
+        .hash(&messages)
+        .into_iter()
+        .zip(children.chunks_exact(2))
+        .map(|(parent, pair)| match parent {
+            Some(parent) => MerkleHashOrchard(parent),
+            None => MerkleHashOrchard::combine(level, &pair[0], &pair[1]),
+        })
+        .collect()
+}
+
 /// Sinsemilla over `WORDS`-word messages as `B = [2^WORDS]Q + Σ [2^(WORDS−1−i)]S[m_i]`
 ///
 /// - `rows[e * TABLE + j] = [2^e]S[j]` for `e < WORDS`
 /// - `first[j]` = `B` after word 0 = `j`, `None` where the spec's step 0 is ⊥
-pub(super) struct Weighted {
+struct Weighted {
     rows: Vec<Coords>,
     first: Vec<Option<Coords>>,
 }
@@ -104,7 +146,7 @@ impl Weighted {
     }
 
     /// Each message's hash, `None` where a step is ⊥ or a doubling (caller recomputes by the spec)
-    pub(super) fn hash(&self, messages: &[[u16; WORDS]]) -> Vec<Option<pallas::Base>> {
+    fn hash(&self, messages: &[[u16; WORDS]]) -> Vec<Option<pallas::Base>> {
         match messages.len() >= LOCKSTEP_LANES {
             true => self.lockstep(messages),
             false => self.projective(messages),
@@ -222,7 +264,7 @@ impl Jacobian {
 }
 
 /// The `K`-bit words of `layer ‖ left ‖ right`
-pub(super) fn words(layer: u8, left: &pallas::Base, right: &pallas::Base) -> [u16; WORDS] {
+fn words(layer: u8, left: &pallas::Base, right: &pallas::Base) -> [u16; WORDS] {
     let mut bits = [0u64; (WORDS * K).div_ceil(64)];
     bits[0] = u64::from(layer);
     place(&mut bits, left, K);
