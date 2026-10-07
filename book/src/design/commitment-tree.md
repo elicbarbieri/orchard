@@ -47,6 +47,56 @@ False
 > (the incomplete addition would return $\perp$ instead), it would arguably be confusing to
 > rely on that.
 
+## Batched MerkleCRH
+
+`MerkleHashOrchard::combine_pairs` evaluates $\mathsf{MerkleCRH}^\mathsf{Orchard}$ for many
+parents at once. Its output equals `combine`'s on every input, the $\perp$ cases included.
+
+### Position weighting
+
+A MerkleCRH message is $n = 52$ ten-bit words $m_0, \ldots, m_{n-1}$: the layer, then the low
+255 bits of each child. Sinsemilla computes $A_0 = Q$ and
+$A_{k+1} = (A_k \mathbin{⸭} S(m_k)) \mathbin{⸭} A_k$. Wherever no step is $\perp$,
+$A_{k+1} = [2]A_k + S(m_k)$, so with $B_k = [2^{n-k}]A_k$:
+
+$$B_0 = [2^n]Q, \qquad B_{k+1} = B_k + W_k, \qquad W_k = [2^{n-1-k}]S(m_k), \qquad B_n = A_n.$$
+
+Tables hold $[2^e]S(j)$ for every $e < n$ and word value $j$, so each step is a single
+addition with no doubling. Word $0$ is the layer, shared by a whole tree level, so $B_1$ is
+precomputed for each word value (with step $0$'s checks done at the same time).
+
+### Exceptions stay exact
+
+Incomplete addition returns $\perp$ exactly when an input is $\mathcal{O}$ or the inputs share an
+$x$-coordinate. Neither $Q$ nor any $S(j)$ is $\mathcal{O}$, and a step's output is never
+$\mathcal{O}$ unless that step is $\perp$. So step $k$ is $\perp$ if and only if
+
+- (c1) $A_k = \pm S(m_k)$ (the first addition), or
+- (c2) $[2]A_k + S(m_k) = \mathcal{O}$ (the second addition, $A_k + S(m_k) = -A_k$).
+
+$\mathbb{P}$ has odd prime order, so $[2^{n-k}]$ is a bijection on the group that commutes with
+negation. Hence (c1) holds if and only if $B_k = \pm D_k$, where $D_k = [2^{n-k}]S(m_k)$ is the
+same word's entry one table row up; the batch path compares $x(B_k)$ with $x(D_k)$. And (c2) holds
+if and only if $B_k = -W_k$.
+
+The chord formula for $B_k + W_k$ fails exactly when $x(B_k) = x(W_k)$. That is either (c2), or
+$B_k = W_k$: then $[2]A_k = S(m_k)$, a doubling at which neither check fires and the specification
+continues normally. The batch path flags every such step, and `combine_pairs` recomputes each
+flagged parent with `combine`, so $\perp$ and the doubling alike come from the specification's own
+algorithm.
+
+### Evaluation
+
+Two strategies produce the same outputs:
+
+- Jacobian lanes: one mixed addition per step, and one batched inversion to recover every
+  parent's $x$. Used for small batches.
+- Lockstep affine lanes: every parent takes step $k$ together, with one batched inversion of the
+  chord denominators per step, and each $x$ is affine at the end. Used from the batch size where
+  one shared inversion per step becomes cheaper than a Jacobian addition per parent.
+
+The batch path runs in variable time; Merkle tree nodes are public.
+
 ## Considered alternatives
 
 We considered splitting the commitment tree into several sub-trees:
